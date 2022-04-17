@@ -13,7 +13,7 @@
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-jvmtiEnv *mJvmtiEnv;
+static jvmtiEnv *mJvmtiEnv;
 MemoryFile *memoryFile;
 jlong tag = 0;
 
@@ -24,9 +24,9 @@ jboolean findFilter(const char *name) {
     std::string tmpstr = name;
     int idx;
     //先判断甩没有Error，有Error直接输出
-    idx = tmpstr.find(mPackageName);
+    idx = tmpstr.find("Error");
     if (idx == std::string::npos) {
-        idx = tmpstr.find("OutOfMemoryError");
+        idx = tmpstr.find(mPackageName);
         if (idx == std::string::npos)//不存在。
         {
             return JNI_FALSE;
@@ -45,7 +45,8 @@ std::string GetCurrentSystemTime() {
     //通过不同精度获取相差的毫秒数
     uint64_t dis_millseconds =
             std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()
-            - std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count() * 1000;
+            -
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count() * 1000;
     time_t tt = std::chrono::system_clock::to_time_t(now);
     struct tm *ptm = localtime(&tt);
     char date[60] = {0};
@@ -71,11 +72,12 @@ jvmtiEnv *CreateJvmtiEnv(JavaVM *vm) {
 extern "C"
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
-    ALOGI("JNI_OnLoad");
+    mVm = vm;
+    //ALOGI("JNI_OnLoad");
     if (vm->GetEnv((void **) &env, JNI_VERSION_1_6) != JNI_OK) {
         return JNI_ERR;
     }
-    ALOGI("JNI_OnLoad Finish");
+    //ALOGI("JNI_OnLoad Finish");
     return JNI_VERSION_1_6;
 }
 
@@ -147,8 +149,13 @@ Java_pers_vaccae_memorymonitor_Monitor_attachInit(JNIEnv *env, jobject thiz, jst
     callbacks.VMObjectAlloc = &objectAlloc;
     callbacks.MethodEntry = &methodEntry;
 
-    ALOGI("SetEventCallbacks");
+    if (mJvmtiEnv != nullptr) {
+        ALOGI("mJvmtiEnv");
+    } else {
+        ALOGI("mJvmtiEnv NULL");
+    }
 
+    ALOGI("SetEventCallbacks");
     //设置回调函数
     int error = mJvmtiEnv->SetEventCallbacks(&callbacks, sizeof(callbacks));
     ALOGI("返回码：%d\n", error);
@@ -168,7 +175,11 @@ JNIEXPORT jint JNICALL
 Agent_OnAttach(JavaVM *vm, char *options, void *reserved) {
     int error;
     //准备JVMTI环境
-    mJvmtiEnv = CreateJvmtiEnv(vm);
+    error = vm->GetEnv((void **) &mJvmtiEnv, JVMTI_VERSION_1_2);
+
+    if (mJvmtiEnv != nullptr) {
+        ALOGI("mJvmtiEnv");
+    }
 
     //开启JVMTI的能力
     jvmtiCapabilities caps;
@@ -179,13 +190,17 @@ Agent_OnAttach(JavaVM *vm, char *options, void *reserved) {
     return JNI_OK;
 }
 
+//初始化工作
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_pers_vaccae_memorymonitor_Monitor_attachRelease(JNIEnv *env, jobject thiz) {
     delete memoryFile;
     //关闭监听
-    mJvmtiEnv->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_VM_OBJECT_ALLOC, NULL);
-    mJvmtiEnv->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_METHOD_ENTRY, NULL);
+    if (mJvmtiEnv != nullptr) {
+        mJvmtiEnv->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_VM_OBJECT_ALLOC, nullptr);
+        mJvmtiEnv->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_METHOD_ENTRY, nullptr);
+    }
 }
 
 extern "C"

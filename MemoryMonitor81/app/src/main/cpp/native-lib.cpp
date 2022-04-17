@@ -1,3 +1,5 @@
+#pragma once
+
 #include <jni.h>
 #include <string>
 #include <android/log.h>
@@ -20,13 +22,32 @@ jlong tag = 0;
 std::string mPackageName;
 
 //查找过滤
-jboolean findFilter(const char *name) {
+jboolean findFilterObjectAlloc(const char *name) {
     std::string tmpstr = name;
     int idx;
     //先判断甩没有Error，有Error直接输出
-    idx = tmpstr.find(mPackageName);
+    idx = tmpstr.find("OutOfMemory");
     if (idx == std::string::npos) {
-        idx = tmpstr.find("OutOfMemoryError");
+        idx = tmpstr.find("vaccae");
+        if (idx == std::string::npos)//不存在。
+        {
+            return JNI_FALSE;
+        } else {
+            return JNI_TRUE;
+        }
+    } else {
+        return JNI_TRUE;
+    }
+}
+
+//查找过滤
+jboolean findFilterMethod(const char *name) {
+    std::string tmpstr = name;
+    int idx;
+    //先判断甩没有Error，有Error直接输出
+    idx = tmpstr.find("OutOfMemory");
+    if (idx == std::string::npos) {
+        idx = tmpstr.find("ryb/medicine/module_inventory");
         if (idx == std::string::npos)//不存在。
         {
             return JNI_FALSE;
@@ -45,7 +66,8 @@ std::string GetCurrentSystemTime() {
     //通过不同精度获取相差的毫秒数
     uint64_t dis_millseconds =
             std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()
-            - std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count() * 1000;
+            -
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count() * 1000;
     time_t tt = std::chrono::system_clock::to_time_t(now);
     struct tm *ptm = localtime(&tt);
     char date[60] = {0};
@@ -55,27 +77,15 @@ std::string GetCurrentSystemTime() {
     return move(std::string(date));
 }
 
-jvmtiEnv *CreateJvmtiEnv(JavaVM *vm) {
-    jvmtiEnv *jvmti_env;
-    jint result = vm->GetEnv((void **) &jvmti_env, JVMTI_VERSION_1_2);
-    if (result != JNI_OK) {
-        ALOGI("CreateJvmtiEnv is NULL");
-        return nullptr;
-    }
-    return jvmti_env;
-}
-
-
-
 //调用System.Load()后会回调该方法
 extern "C"
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
-    ALOGI("JNI_OnLoad");
+    //ALOGI("JNI_OnLoad");
     if (vm->GetEnv((void **) &env, JNI_VERSION_1_6) != JNI_OK) {
         return JNI_ERR;
     }
-    ALOGI("JNI_OnLoad Finish");
+    //ALOGI("JNI_OnLoad Finish");
     return JNI_VERSION_1_6;
 }
 
@@ -93,16 +103,20 @@ void JNICALL objectAlloc(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jthread thread,
     char *classSignature;
     jvmti_env->GetClassSignature(object_klass, &classSignature, nullptr);
 
-    if (mPackageName.empty() || findFilter(classSignature)) {
+
+    if (findFilterObjectAlloc(classSignature)) {
         //写入日志文件
         char str[500];
-        char *format = "%s: object alloc {Thread:%s Class:%s Size:%lld Tag:%lld} \r\n";
-        //ALOGI(format, GetCurrentSystemTime().c_str(),threadInfo.name, classSignature, size, tag);
+        const char *format = "%s: object alloc {Thread:%s Class:%s Size:%lld Tag:%lld} \r\n";
+        ALOGI(format, GetCurrentSystemTime().c_str(), threadInfo.name, classSignature, size, tag);
         sprintf(str, format, GetCurrentSystemTime().c_str(), threadInfo.name, classSignature, size,
                 tag);
-        memoryFile->write(str, sizeof(char) * strlen(str));
+        //ALOGI("file:%s", MemoryFile::m_path.c_str());
+
+        MemoryFile::Write(str, sizeof(char) * strlen(str));
+        //}
+        jvmti_env->Deallocate((unsigned char *) classSignature);
     }
-    jvmti_env->Deallocate((unsigned char *) classSignature);
 }
 
 void JNICALL methodEntry(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jthread thread, jmethodID method) {
@@ -117,50 +131,21 @@ void JNICALL methodEntry(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jthread thread, j
     //获得方法名字
     jvmti_env->GetMethodName(method, &methodName, nullptr, nullptr);
 
-    if (mPackageName.empty() || findFilter(signature)) {
+
+    if (findFilterObjectAlloc(signature)) {
         //写日志文件
         char str[500];
         char *format = "%s: methodEntry {%s %s} \r\n";
-        //ALOGI(format, GetCurrentSystemTime().c_str(), signature, methodName);
+        ALOGI(format, GetCurrentSystemTime().c_str(), signature, methodName);
         sprintf(str, format, GetCurrentSystemTime().c_str(), signature, methodName);
-        memoryFile->write(str, sizeof(char) * strlen(str));
+
+        MemoryFile::Write(str, sizeof(char) * strlen(str));
     }
 
     jvmti_env->Deallocate((unsigned char *) methodName);
     jvmti_env->Deallocate((unsigned char *) signature);
 }
 
-extern "C"
-JNIEXPORT void JNICALL
-Java_pers_vaccae_memorymonitor_Monitor_attachInit(JNIEnv *env, jobject thiz, jstring path) {
-    ALOGI("attachInit");
-
-    const char *_path = env->GetStringUTFChars(path, NULL);
-
-    ALOGI("mPackageName:%s", mPackageName.c_str());
-
-    memoryFile = new MemoryFile(_path);
-
-    //开启JVMTI事件监听
-    jvmtiEventCallbacks callbacks;
-    memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.VMObjectAlloc = &objectAlloc;
-    callbacks.MethodEntry = &methodEntry;
-
-    ALOGI("SetEventCallbacks");
-
-    //设置回调函数
-    int error = mJvmtiEnv->SetEventCallbacks(&callbacks, sizeof(callbacks));
-    ALOGI("返回码：%d\n", error);
-
-    //开启监听
-    mJvmtiEnv->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_OBJECT_ALLOC, nullptr);
-    mJvmtiEnv->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_METHOD_ENTRY, nullptr);
-
-    env->ReleaseStringUTFChars(path, _path);
-
-    ALOGI("attachInit Finished");
-}
 
 //初始化工作
 extern "C"
@@ -168,31 +153,34 @@ JNIEXPORT jint JNICALL
 Agent_OnAttach(JavaVM *vm, char *options, void *reserved) {
     int error;
     //准备JVMTI环境
-    mJvmtiEnv = CreateJvmtiEnv(vm);
+    vm->GetEnv((void **) &mJvmtiEnv, JVMTI_VERSION_1_2);
+
+    std::string path = "/data/user/0/pers.vaccae.memorymonitor/files/log/" +
+                       GetCurrentSystemTime() + ".log";
+    //初始化
+    MemoryFile::Init(path.c_str());
 
     //开启JVMTI的能力
     jvmtiCapabilities caps;
     mJvmtiEnv->GetPotentialCapabilities(&caps);
     mJvmtiEnv->AddCapabilities(&caps);
 
+    //开启JVMTI事件监听
+    jvmtiEventCallbacks callbacks;
+    memset(&callbacks, 0, sizeof(callbacks));
+    //callbacks.VMObjectAlloc = &objectAlloc;
+    callbacks.MethodEntry = &methodEntry;
+
+    ALOGI("SetEventCallbacks");
+    //设置回调函数
+    error = mJvmtiEnv->SetEventCallbacks(&callbacks, sizeof(callbacks));
+    ALOGI("返回码：%d\n", error);
+
+    //开启监听
+//    mJvmtiEnv->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_OBJECT_ALLOC, nullptr);
+    mJvmtiEnv->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_METHOD_ENTRY, nullptr);
+
+
     ALOGI("Agent_OnAttach Finish");
     return JNI_OK;
-}
-
-extern "C"
-JNIEXPORT void JNICALL
-Java_pers_vaccae_memorymonitor_Monitor_attachRelease(JNIEnv *env, jobject thiz) {
-    delete memoryFile;
-    //关闭监听
-    mJvmtiEnv->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_VM_OBJECT_ALLOC, NULL);
-    mJvmtiEnv->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_METHOD_ENTRY, NULL);
-}
-
-extern "C"
-JNIEXPORT void JNICALL
-Java_pers_vaccae_memorymonitor_Monitor_attachWFilters(JNIEnv *env, jobject thiz,
-                                                      jstring packagename) {
-    const char *_packagename = env->GetStringUTFChars(packagename, NULL);
-    mPackageName = std::string(_packagename);
-    env->ReleaseStringUTFChars(packagename, _packagename);
 }
